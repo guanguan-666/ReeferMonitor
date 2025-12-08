@@ -16,7 +16,9 @@
 #include <QVector>
 #include "containercard.h"
 #include "containerdetaildialog.h"
-
+#include <QtSql/QSqlDatabase>
+#include <QtSql/QSqlQuery>
+#include <QtSql/QSqlError>
 using namespace QtCharts;
 
 // 数据结构
@@ -76,6 +78,9 @@ private:
 
     QTimer *timer;
     bool isDarkMode;
+
+    QSqlDatabase m_db;
+    void initDatabase(); // 用于初始化连接
 };
 
 #endif // MAINWINDOW_H

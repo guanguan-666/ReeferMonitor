@@ -10,6 +10,9 @@
 #include <QPieSlice>
 #include <QSplineSeries>
 #include <QCategoryAxis>
+#include <QFileInfo>
+#include <QDir>
+
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -32,9 +35,32 @@ MainWindow::MainWindow(QWidget *parent)
     setupUI();
     updateStyle(); // 应用初始样式
 
-    timer = new QTimer(this);
-    connect(timer, &QTimer::timeout, this, &MainWindow::updateSimulation);
-    timer->start(1000);
+    // === 新增：连接数据库 ===
+        //initDatabase();
+
+        timer = new QTimer(this);
+        // 将原来的 updateSimulation 改名为 updateFromDB，或者直接修改原函数逻辑
+        connect(timer, &QTimer::timeout, this, &MainWindow::updateSimulation);
+        timer->start(1000); // 1秒刷新一次
+}
+
+void MainWindow::initDatabase()
+{
+    if (QSqlDatabase::contains("qt_sql_default_connection")) {
+        m_db = QSqlDatabase::database("qt_sql_default_connection");
+    } else {
+        m_db = QSqlDatabase::addDatabase("QSQLITE");
+
+        // 【关键】这里填你脚本同步到的 Windows 本地路径
+                // 注意路径分隔符用斜杠 /
+                m_db.setDatabaseName("C:/Users/User/Desktop/sync_db/sensor_data.db");
+    }
+
+    if (!m_db.open()) {
+        qDebug() << "Error: Failed to connect database." << m_db.lastError();
+    } else {
+        qDebug() << "Success: Database connected!";
+    }
 }
 
 MainWindow::~MainWindow()
@@ -393,27 +419,104 @@ QWidget* MainWindow::createTopStatCard(QString title, QString value, QString ico
     return card;
 }
 
+
 void MainWindow::updateSimulation()
 {
-    double total = 0;
-    for(int i=0; i<m_cards.size(); i++) {
-        double noise = (QRandomGenerator::global()->bounded(10) - 5) / 10.0;
-        m_data[i].temp += noise;
-        if(m_data[i].temp > -16.0) m_data[i].temp -= 0.3;
-        if(m_data[i].temp < -20.0) m_data[i].temp += 0.3;
-        m_data[i].pressure = 0.3 + (m_data[i].temp + 20) * 0.05;
-        m_data[i].superheat = 5.0 - noise * 2;
-        m_data[i].valve = 45 + (int)(noise * 10);
-        m_data[i].rssi = -80 + QRandomGenerator::global()->bounded(10) - 5;
+    // =========================================================
+    // 1. 定义路径 (已更新为您指定的桌面路径)
+    // =========================================================
+    // 注意：Qt 中路径分隔符建议使用斜杠 "/"，即使在 Windows 上
+    QString sourceDbPath = "C:/Users/User/Desktop/sync_db/sensor_data.db";
+    QString tempDbPath = QDir::tempPath() + "/view_copy.db";
 
-        m_cards[i]->updateData(m_data[i].temp, m_data[i].superheat, m_data[i].rssi, true, true);
-        emit broadcastData(m_data[i].id, m_data[i].temp, m_data[i].pressure, m_data[i].superheat, m_data[i].valve, m_data[i].rssi);
-        total += m_data[i].temp;
+    // =========================================================
+    // 2. 安全拷贝逻辑 (防止和 pscp 抢文件锁)
+    // =========================================================
+
+    // 如果源文件还不存在(同步脚本还没跑)，直接跳过
+    if (!QFile::exists(sourceDbPath)) {
+        return;
     }
-    if(lblAvgTemp && m_cards.size() > 0) {
-        lblAvgTemp->setText(QString::number(total/m_cards.size(), 'f', 1) + "°C");
+
+    // 删除上一秒留下的旧副本
+    if (QFile::exists(tempDbPath)) {
+        QFile::remove(tempDbPath);
+    }
+
+    // 尝试拷贝：如果 pscp 正在写入，这里可能失败，直接 return 等下一秒即可，不会崩
+    if (!QFile::copy(sourceDbPath, tempDbPath)) {
+        return;
+    }
+
+    // =========================================================
+    // 3. 读取数据库
+    // =========================================================
+    {
+        QSqlDatabase db;
+        // 使用临时连接名，避免冲突
+        if (QSqlDatabase::contains("qt_temp_connection")) {
+            db = QSqlDatabase::database("qt_temp_connection");
+        } else {
+            db = QSqlDatabase::addDatabase("QSQLITE", "qt_temp_connection");
+        }
+        db.setDatabaseName(tempDbPath);
+
+        if (db.open()) {
+            QSqlQuery query(db);
+
+            // 查询逻辑：取出每个设备 ID 最新的那一条记录
+            QString sql = "SELECT device_id, temperature, lost_count FROM sensor_log "
+                          "WHERE id IN (SELECT MAX(id) FROM sensor_log GROUP BY device_id)";
+
+            if (query.exec(sql)) {
+                while (query.next()) {
+                    int devId = query.value("device_id").toInt();
+                    double temp = query.value("temperature").toDouble();
+                    // int lost = query.value("lost_count").toInt();
+
+                    // 映射逻辑：数据库 ID (1~66) -> 数组下标 (0~65)
+                    int index = devId - 1;
+
+                    // 安全检查
+                    if (index >= 0 && index < m_data.size()) {
+                        m_data[index].temp = temp;
+                        m_data[index].rssi = -80; // 暂时写死，后续可从C端传
+                        // 简单模拟压力
+                        m_data[index].pressure = 0.3 + (temp + 20) * 0.05;
+
+                        // 刷新 UI 卡片
+                        m_cards[index]->updateData(
+                            m_data[index].temp,
+                            m_data[index].superheat,
+                            m_data[index].rssi,
+                            true, // 在线
+                            true  // PID运行
+                        );
+                    }
+                }
+            }
+            db.close(); // 查完立刻关闭
+        }
+    }
+    // 移除连接，释放对 view_copy.db 的占用
+    QSqlDatabase::removeDatabase("qt_temp_connection");
+
+    // =========================================================
+    // 4. 更新顶部平均温度
+    // =========================================================
+    double totalTemp = 0;
+    int validCount = 0;
+    for(const auto &node : m_data) {
+        totalTemp += node.temp;
+        validCount++;
+    }
+
+    if(lblAvgTemp && validCount > 0) {
+        lblAvgTemp->setText(QString::number(totalTemp / validCount, 'f', 1) + "°C");
     }
 }
+
+
 
 void MainWindow::onNavButtonClicked(int id) { mainStack->setCurrentIndex(id); }
 void MainWindow::onCardClicked(QString id) {

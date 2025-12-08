@@ -3,7 +3,7 @@
 # ----------------------------------------------------
 
 QT       += core gui
-QT       += charts  # <---【关键】这一行绝对不能少！
+QT       += charts sql # <---【关键】这一行绝对不能少！
 
 greaterThan(QT_MAJOR_VERSION, 4): QT += widgets
 
